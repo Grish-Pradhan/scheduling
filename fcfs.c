@@ -1,155 +1,212 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <time.h>
-#endif
-
-/* ---------------- High-resolution timing ---------------- */
-
-double now_ms() {
-#ifdef _WIN32
-    static LARGE_INTEGER freq;
-    static int initialized = 0;
-    LARGE_INTEGER counter;
-
-    if (!initialized) {
-        QueryPerformanceFrequency(&freq);
-        initialized = 1;
-    }
-    QueryPerformanceCounter(&counter);
-    return (double)counter.QuadPart * 1000.0 / freq.QuadPart;
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-#endif
-}
-
-/* ---------------- Process structure ---------------- */
+#define MAX 20
+#define PAGE_SIZE 4  // 4 KB pages
+#define MEMORY_FRAMES 10  // Limited memory frames
 
 typedef struct {
     int pid;
-    int arrival;
-    int burst;
-
-    int start;
-    int completion;
-    int waiting;
-    int turnaround;
-    int response;
+    int at, bt;
+    int priority;
+    int start, finish;
+    int wt, tat, rt;
+    int memory_pages;
+    int in_memory;
+    int swap_in_count;
+    int swap_out_count;
 } Process;
 
-/* ---------------- FCFS Scheduling ---------------- */
-
-int compare_arrival(const void *a, const void *b) {
-    return ((Process *)a)->arrival - ((Process *)b)->arrival;
+void hardcoded_data(Process p[], int *n) {
+    *n = 10;
+    
+    // Hardcoded test data from the image
+    int arrival[] = {0, 1, 2, 4, 3, 2, 6, 5, 7, 8};
+    int burst[] = {5, 3, 8, 5, 6, 2, 3, 4, 9, 7};
+    int priority[] = {1, 3, 5, 6, 8, 9, 7, 5, 6, 3};
+    int pages[] = {3, 2, 4, 2, 3, 1, 2, 3, 5, 4};  // Memory pages
+    
+    for (int i = 0; i < *n; i++) {
+        p[i].pid = i + 1;
+        p[i].at = arrival[i];
+        p[i].bt = burst[i];
+        p[i].priority = priority[i];
+        p[i].memory_pages = pages[i];
+        p[i].in_memory = 0;
+        p[i].swap_in_count = 0;
+        p[i].swap_out_count = 0;
+    }
 }
 
 int main() {
-    int n;
-    printf("Enter number of processes: ");
-    scanf("%d", &n);
+    Process p[MAX];
+    int n, time = 0, cpu_busy = 0, context_switches = 0;
+    
+    // Swapping metrics
+    int total_page_faults = 0;
+    int total_swap_ins = 0;
+    int total_swap_outs = 0;
+    int memory_frames_used = 0;
+    double swap_overhead_time = 0;
 
-    double preprocess_start = now_ms();
-
-    Process *p = malloc(sizeof(Process) * n);
-
+    // Load hardcoded data
+    hardcoded_data(p, &n);
+    
+    printf("======== FIRST COME FIRST SERVE (FCFS) SCHEDULING ========\n");
+    printf("Using hardcoded test data with %d processes\n", n);
+    printf("\nInput Data:\n");
+    printf("Process | AT | BT | Priority | Pages\n");
+    printf("----------------------------------------\n");
     for (int i = 0; i < n; i++) {
-        p[i].pid = i + 1;
-        printf("P%d Arrival Time: ", p[i].pid);
-        scanf("%d", &p[i].arrival);
-        printf("P%d Burst Time: ", p[i].pid);
-        scanf("%d", &p[i].burst);
+        printf("P%-6d | %2d | %2d |    %2d    |  %2d\n", 
+               p[i].pid, p[i].at, p[i].bt, p[i].priority, p[i].memory_pages);
+    }
+    printf("\n");
+
+    // Sort by arrival time
+    for(int i=0; i<n-1; i++) {
+        for(int j=i+1; j<n; j++) {
+            if(p[i].at > p[j].at) {
+                Process tmp = p[i]; 
+                p[i] = p[j]; 
+                p[j] = tmp;
+            }
+        }
     }
 
-    qsort(p, n, sizeof(Process), compare_arrival);
+    for(int i=0; i<n; i++) {
+        if(time < p[i].at) time = p[i].at;
 
-    double preprocess_end = now_ms();
-    double schedule_start = now_ms();
-
-    int time = 0;
-    int idle_time = 0;
-    int total_burst = 0;
-
-    for (int i = 0; i < n; i++) {
-        if (time < p[i].arrival) {
-            idle_time += p[i].arrival - time;
-            time = p[i].arrival;
+        // Simulate swapping mechanism
+        if (!p[i].in_memory) {
+            // Need to swap in
+            if (memory_frames_used + p[i].memory_pages > MEMORY_FRAMES) {
+                // Memory full - swap out previous process if still in memory
+                for (int j = 0; j < i; j++) {
+                    if (p[j].in_memory) {
+                        p[j].in_memory = 0;
+                        p[j].swap_out_count++;
+                        total_swap_outs++;
+                        memory_frames_used -= p[j].memory_pages;
+                        swap_overhead_time += 0.5;
+                        break;
+                    }
+                }
+            }
+            
+            // Swap in current process
+            p[i].in_memory = 1;
+            p[i].swap_in_count++;
+            total_swap_ins++;
+            total_page_faults += p[i].memory_pages;
+            memory_frames_used += p[i].memory_pages;
+            swap_overhead_time += 1.0;
         }
 
         p[i].start = time;
-        p[i].completion = time + p[i].burst;
-        p[i].turnaround = p[i].completion - p[i].arrival;
-        p[i].waiting = p[i].turnaround - p[i].burst;
-        p[i].response = p[i].start - p[i].arrival;
+        p[i].rt = p[i].start - p[i].at;
 
-        time = p[i].completion;
-        total_burst += p[i].burst;
+        time += p[i].bt;
+        p[i].finish = time;
+        p[i].tat = p[i].finish - p[i].at;
+        p[i].wt = p[i].tat - p[i].bt;
+
+        // Free memory after completion
+        p[i].in_memory = 0;
+        memory_frames_used -= p[i].memory_pages;
+
+        cpu_busy += p[i].bt;
+        if(i > 0) context_switches++;
     }
 
-    double schedule_end = now_ms();
+    // Calculate metrics
+    double avg_wt=0, avg_tat=0, avg_rt=0;
+    int wt_max=0, wt_min=1e9;
+    int tat_max=0, tat_min=1e9;
+    int rt_max=0, rt_min=1e9;
 
-    /* ---------------- Metrics ---------------- */
-
-    double sum_wt = 0, sum_tat = 0, sum_rt = 0;
-    int min_wt = p[0].waiting, max_wt = p[0].waiting;
-    int min_tat = p[0].turnaround, max_tat = p[0].turnaround;
-    int min_rt = p[0].response, max_rt = p[0].response;
-
-    for (int i = 0; i < n; i++) {
-        sum_wt += p[i].waiting;
-        sum_tat += p[i].turnaround;
-        sum_rt += p[i].response;
-
-        if (p[i].waiting < min_wt) min_wt = p[i].waiting;
-        if (p[i].waiting > max_wt) max_wt = p[i].waiting;
-
-        if (p[i].turnaround < min_tat) min_tat = p[i].turnaround;
-        if (p[i].turnaround > max_tat) max_tat = p[i].turnaround;
-
-        if (p[i].response < min_rt) min_rt = p[i].response;
-        if (p[i].response > max_rt) max_rt = p[i].response;
+    for(int i=0; i<n; i++) {
+        avg_wt += p[i].wt;
+        avg_tat += p[i].tat;
+        avg_rt += p[i].rt;
+        
+        if(p[i].wt > wt_max) wt_max = p[i].wt;
+        if(p[i].wt < wt_min) wt_min = p[i].wt;
+        if(p[i].tat > tat_max) tat_max = p[i].tat;
+        if(p[i].tat < tat_min) tat_min = p[i].tat;
+        if(p[i].rt > rt_max) rt_max = p[i].rt;
+        if(p[i].rt < rt_min) rt_min = p[i].rt;
     }
 
-    double avg_wt = sum_wt / n;
-    double avg_tat = sum_tat / n;
-    double avg_rt = sum_rt / n;
+    avg_wt /= n; 
+    avg_tat /= n; 
+    avg_rt /= n;
 
-    double total_time = time;
-    double cpu_util = ((double)total_burst / total_time) * 100.0;
-    double throughput = (double)n / total_time;
+    // Variance calculation
+    double wt_var = 0, tat_var = 0, rt_var = 0;
+    for(int i=0; i<n; i++) {
+        wt_var += pow(p[i].wt - avg_wt, 2);
+        tat_var += pow(p[i].tat - avg_tat, 2);
+        rt_var += pow(p[i].rt - avg_rt, 2);
+    }
+    wt_var /= n;
+    tat_var /= n;
+    rt_var /= n;
 
-    /* ---------------- Output ---------------- */
+    double wt_std = sqrt(wt_var);
+    double tat_std = sqrt(tat_var);
+    double rt_std = sqrt(rt_var);
 
-    printf("\nPID\tAT\tBT\tST\tCT\tWT\tTAT\tRT\n");
-    for (int i = 0; i < n; i++) {
-        printf("P%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
-               p[i].pid,
-               p[i].arrival,
-               p[i].burst,
-               p[i].start,
-               p[i].completion,
-               p[i].waiting,
-               p[i].turnaround,
-               p[i].response);
+    double throughput = (double)n / time;
+    double cpu_util = ((double)cpu_busy / time) * 100;
+
+    // Display table
+    printf("\n==================== PROCESS DETAILS (FCFS) ====================\n");
+    printf("PID | AT | BT | Start | Finish | WT | TAT | RT | Pages | SwapIn | SwapOut\n");
+    printf("---------------------------------------------------------------------\n");
+    for(int i=0; i<n; i++) {
+        printf("P%-2d | %2d | %2d |  %3d  |  %4d  | %2d | %3d | %2d |   %2d  |   %2d   |   %2d\n",
+               p[i].pid, p[i].at, p[i].bt, p[i].start, p[i].finish,
+               p[i].wt, p[i].tat, p[i].rt, p[i].memory_pages,
+               p[i].swap_in_count, p[i].swap_out_count);
     }
 
-    printf("\n--- Statistics ---\n");
-    printf("WT  : min=%d max=%d avg=%.2f\n", min_wt, max_wt, avg_wt);
-    printf("TAT : min=%d max=%d avg=%.2f\n", min_tat, max_tat, avg_tat);
-    printf("RT  : min=%d max=%d avg=%.2f\n", min_rt, max_rt, avg_rt);
+    printf("\n================ CPU PERFORMANCE METRICS ================\n");
+    printf("Total Execution Time    : %d units\n", time);
+    printf("CPU Utilization         : %.2f%%\n", cpu_util);
+    printf("Throughput              : %.3f processes/unit\n", throughput);
+    printf("Context Switches        : %d\n", context_switches);
 
-    printf("\nCPU Utilization    : %.2f %%\n", cpu_util);
-    printf("Throughput         : %.6f processes/ms\n", throughput);
+    printf("\n=============== SCHEDULING TIME METRICS =================\n");
+    printf("Average Waiting Time    : %.2f units\n", avg_wt);
+    printf("Average Turnaround Time : %.2f units\n", avg_tat);
+    printf("Average Response Time   : %.2f units\n", avg_rt);
+    printf("Maximum Waiting Time    : %d units\n", wt_max);
+    printf("Minimum Waiting Time    : %d units\n", wt_min);
+    printf("Maximum Turnaround Time : %d units\n", tat_max);
+    printf("Minimum Turnaround Time : %d units\n", tat_min);
+    printf("Maximum Response Time   : %d units\n", rt_max);
+    printf("Minimum Response Time   : %d units\n", rt_min);
 
-    printf("\n--- Timing ---\n");
-    printf("Pre-process time   : %.3f ms\n", preprocess_end - preprocess_start);
-    printf("Scheduling time    : %.3f ms\n", schedule_end - schedule_start);
-    printf("Total wall time    : %.3f ms\n", schedule_end - preprocess_start);
+    printf("\n================== VARIANCE ANALYSIS ====================\n");
+    printf("Waiting Time     - Variance: %.2f, Std Dev: %.2f\n", wt_var, wt_std);
+    printf("Turnaround Time  - Variance: %.2f, Std Dev: %.2f\n", tat_var, tat_std);
+    printf("Response Time    - Variance: %.2f, Std Dev: %.2f\n", rt_var, rt_std);
 
-    free(p);
+    printf("\n================ MEMORY & SWAPPING METRICS ==============\n");
+    printf("Total Page Faults        : %d\n", total_page_faults);
+    printf("Total Swap-In Operations : %d\n", total_swap_ins);
+    printf("Total Swap-Out Operations: %d\n", total_swap_outs);
+    printf("Memory Frames Available  : %d\n", MEMORY_FRAMES);
+    printf("Swapping Overhead Time   : %.2f units\n", swap_overhead_time);
+    printf("Effective CPU Utilization: %.2f%% (with swapping)\n", 
+           ((double)cpu_busy / (time + swap_overhead_time)) * 100);
+    printf("Average Swaps per Process: %.2f\n", 
+           (double)(total_swap_ins + total_swap_outs) / n);
+    printf("Page Fault Rate          : %.3f faults/unit time\n", 
+           (double)total_page_faults / time);
+    printf("=========================================================\n");
+
     return 0;
 }
